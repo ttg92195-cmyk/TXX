@@ -1,32 +1,42 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/note.dart';
-import '../services/note_storage.dart';
+import '../providers/notes_provider.dart';
 
 /// Single screen used for both creating new notes and editing existing ones.
 ///
-/// When [existingNote] is null, the screen operates in "create" mode.
-/// When provided, it operates in "edit" mode and pre-populates the fields.
-class NoteEditorScreen extends StatefulWidget {
-  final NoteStorage storage;
+/// Phase 2 — Auto-save:
+///   Every keystroke schedules a debounced write (800ms after the last edit).
+///   The footer status cycles through:
+///     "Unsaved changes" -> "Saving..." -> "Saved <time>"
+///   The user never has to tap Save, though the Save button still works
+///   as an explicit "save now" shortcut.
+class NoteEditorScreen extends ConsumerStatefulWidget {
   final Note? existingNote;
 
   const NoteEditorScreen({
     super.key,
-    required this.storage,
     this.existingNote,
   });
 
   @override
-  State<NoteEditorScreen> createState() => _NoteEditorScreenState();
+  ConsumerState<NoteEditorScreen> createState() => _NoteEditorScreenState();
 }
 
-class _NoteEditorScreenState extends State<NoteEditorScreen> {
+/// Internal auto-save status shown in the footer.
+enum _SaveStatus { clean, dirty, saving, saved }
+
+class _NoteEditorScreenState extends ConsumerState<NoteEditorScreen> {
   late final TextEditingController _titleController;
   late final TextEditingController _contentController;
   late final FocusNode _contentFocus;
+
+  Timer? _debounce;
   bool _isSaving = false;
-  bool _hasChanges = false;
-  bool _autoSaved = false;
+  _SaveStatus _status = _SaveStatus.clean;
+  DateTime? _lastSavedAt;
+  String? _activeNoteId; // null = creating new; non-null = editing existing
 
   bool get _isEditing => widget.existingNote != null;
 
@@ -38,121 +48,101 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _contentController =
         TextEditingController(text: widget.existingNote?.content ?? '');
     _contentFocus = FocusNode();
+    _activeNoteId = widget.existingNote?.id;
 
-    _titleController.addListener(_markChanged);
-    _contentController.addListener(_markChanged);
+    _titleController.addListener(_onChanged);
+    _contentController.addListener(_onChanged);
   }
 
-  void _markChanged() {
-    if (!_hasChanges) {
-      setState(() => _hasChanges = true);
+  void _onChanged() {
+    if (_status != _SaveStatus.dirty && _status != _SaveStatus.saving) {
+      setState(() => _status = _SaveStatus.dirty);
+    } else if (_status == _SaveStatus.saved) {
+      setState(() => _status = _SaveStatus.dirty);
     }
+    // Reset the debounce timer on every keystroke — Option B style.
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 800), _autoSave);
+  }
+
+  Future<void> _autoSave() async {
+    final title = _titleController.text.trim();
+    final content = _contentController.text.trim();
+
+    // Don't save an empty note — wait for content.
+    if (title.isEmpty && content.isEmpty) return;
+
+    if (!mounted) return;
+    setState(() {
+      _isSaving = true;
+      _status = _SaveStatus.saving;
+    });
+
+    try {
+      final actions = ref.read(notesActionsProvider);
+      if (_activeNoteId == null) {
+        // Creating a brand-new note via auto-save.
+        final created = await actions.createNote(title: title, content: content);
+        _activeNoteId = created.id;
+      } else {
+        // Updating an existing note.
+        await actions.updateNote(
+          id: _activeNoteId!,
+          title: title,
+          content: content,
+        );
+      }
+      if (!mounted) return;
+      setState(() {
+        _isSaving = false;
+        _status = _SaveStatus.saved;
+        _lastSavedAt = DateTime.now();
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSaving = false;
+        _status = _SaveStatus.dirty; // keep "unsaved" so user knows to retry
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Auto-save failed: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<void> _saveNow() async {
+    _debounce?.cancel();
+    await _autoSave();
+  }
+
+  Future<bool> _onWillPop() async {
+    // If there are pending changes, flush them before leaving.
+    if (_status == _SaveStatus.dirty || _status == _SaveStatus.saving) {
+      await _saveNow();
+    }
+    return true;
   }
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _titleController.dispose();
     _contentController.dispose();
     _contentFocus.dispose();
     super.dispose();
   }
 
-  Future<bool> _onWillPop() async {
-    if (!_hasChanges) return true;
-    final title = _titleController.text.trim();
-    final content = _contentController.text.trim();
-    if (title.isEmpty && content.isEmpty) return true;
-
-    final action = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Save changes?'),
-        content: const Text(
-            'You have unsaved changes. Do you want to save them before leaving?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'discard'),
-            child: const Text('Discard'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'cancel'),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, 'save'),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    if (action == 'cancel') return false;
-    if (action == 'save') {
-      await _saveNote();
-    }
-    return true;
-  }
-
-  Future<void> _saveNote() async {
-    final title = _titleController.text.trim();
-    final content = _contentController.text.trim();
-    if (title.isEmpty && content.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Cannot save an empty note'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-      return;
-    }
-
-    setState(() => _isSaving = true);
-    try {
-      if (_isEditing) {
-        await widget.storage.updateNote(
-          id: widget.existingNote!.id,
-          title: title,
-          content: content,
-        );
-      } else {
-        await widget.storage.createNote(title: title, content: content);
-      }
-      if (!mounted) return;
-      setState(() {
-        _isSaving = false;
-        _hasChanges = false;
-        _autoSaved = true;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(_isEditing ? 'Note updated' : 'Note created'),
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 1),
-        ),
-      );
-      Navigator.of(context).pop(true);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _isSaving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Failed to save: $e'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return PopScope(
-      canPop: !_hasChanges,
+      canPop: true,
       onPopInvoked: (didPop) async {
         if (didPop) return;
-        final shouldPop = await _onWillPop();
-        if (shouldPop && mounted) {
-          Navigator.of(context).pop(_autoSaved);
-        }
+        await _onWillPop();
       },
       child: Scaffold(
         appBar: AppBar(
@@ -163,8 +153,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           actions: [
             IconButton(
               icon: const Icon(Icons.check),
-              tooltip: 'Save',
-              onPressed: _isSaving ? null : _saveNote,
+              tooltip: 'Save now',
+              onPressed: _isSaving ? null : _saveNow,
             ),
           ],
         ),
@@ -209,26 +199,15 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   ),
                 ),
               ),
-              if (_hasChanges)
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 8),
-                  color: theme.colorScheme.surfaceContainerHighest
-                      .withOpacity(0.4),
-                  child: Text(
-                    'Unsaved changes',
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
+              _AutoSaveBar(
+                status: _status,
+                lastSavedAt: _lastSavedAt,
+              ),
             ],
           ),
         ),
         floatingActionButton: FloatingActionButton(
-          onPressed: _isSaving ? null : _saveNote,
+          onPressed: _isSaving ? null : _saveNow,
           child: _isSaving
               ? const SizedBox(
                   width: 22,
@@ -239,5 +218,64 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         ),
       ),
     );
+  }
+}
+
+/// Footer bar that surfaces the current auto-save state to the user.
+class _AutoSaveBar extends StatelessWidget {
+  final _SaveStatus status;
+  final DateTime? lastSavedAt;
+
+  const _AutoSaveBar({required this.status, this.lastSavedAt});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final (label, color, icon) = switch (status) {
+      _SaveStatus.clean => (
+          'All changes saved',
+          theme.colorScheme.outline,
+          Icons.cloud_done_outlined,
+        ),
+      _SaveStatus.dirty => (
+          'Unsaved changes',
+          theme.colorScheme.onSurfaceVariant,
+          Icons.edit_outlined,
+        ),
+      _SaveStatus.saving => (
+          'Saving...',
+          theme.colorScheme.primary,
+          Icons.sync,
+        ),
+      _SaveStatus.saved => (
+          'Saved ${_shortTime(lastSavedAt)}',
+          theme.colorScheme.outline,
+          Icons.check_circle_outline,
+        ),
+    };
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(color: color),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _shortTime(DateTime? dt) {
+    if (dt == null) return '';
+    final h = dt.hour.toString().padLeft(2, '0');
+    final m = dt.minute.toString().padLeft(2, '0');
+    return '$h:$m';
   }
 }

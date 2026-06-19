@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:timeago/timeago.dart' as timeago;
 import '../models/note.dart';
 
 /// Card widget that displays a single note's summary in the list.
-class NoteCard extends StatelessWidget {
+class NoteCard extends ConsumerWidget {
   final Note note;
   final VoidCallback onTap;
   final VoidCallback onEdit;
@@ -17,15 +19,21 @@ class NoteCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final hasTitle = note.title.trim().isNotEmpty;
     final hasContent = note.content.trim().isNotEmpty;
+
+    // Use timeago for relative timestamps ("3m ago", "1h ago", etc.)
+    // Re-render once per minute so the relative label stays fresh.
+    // (The card is rebuilt on every list refresh anyway.)
+    final timeLabel = timeago.format(note.updatedAt);
 
     return Card(
       color: theme.colorScheme.surfaceContainerLow,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onEdit,
         borderRadius: BorderRadius.circular(16),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -106,7 +114,7 @@ class NoteCard extends StatelessWidget {
                   ),
                   const SizedBox(width: 4),
                   Text(
-                    _formatDate(note.updatedAt),
+                    timeLabel,
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.outline,
                     ),
@@ -126,17 +134,5 @@ class NoteCard extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  String _formatDate(DateTime dt) {
-    final now = DateTime.now();
-    final diff = now.difference(dt);
-    if (diff.inMinutes < 1) return 'just now';
-    if (diff.inHours < 1) return '${diff.inMinutes}m ago';
-    if (diff.inDays < 1) return '${diff.inHours}h ago';
-    if (diff.inDays < 7) return '${diff.inDays}d ago';
-    final m = dt.month.toString().padLeft(2, '0');
-    final d = dt.day.toString().padLeft(2, '0');
-    return '${dt.year}-$m-$d';
   }
 }

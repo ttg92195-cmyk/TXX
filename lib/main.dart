@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
-import 'services/note_storage.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:timeago/timeago.dart' as timeago;
 import 'screens/home_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const TextpadApp());
+  // Configure timeago: enable short suffixes for compact list display.
+  timeago.setLocaleMessages('en_short', timeago.EnShortMessages());
+  runApp(const ProviderScope(child: TextpadApp()));
 }
 
 class TextpadApp extends StatelessWidget {
@@ -54,7 +57,7 @@ class TextpadApp extends StatelessWidget {
         useMaterial3: true,
       ),
       themeMode: ThemeMode.system,
-      home: HomeScreen(storage: NoteStorage()),
+      home: const HomeScreen(),
     );
   }
 }
