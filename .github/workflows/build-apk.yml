@@ -1,0 +1,86 @@
+name: Build Release APK
+
+# Triggers:
+#   - Every push to `main` (e.g. when Phase 2 code lands)
+#   - Manual run from the Actions tab
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# softprops/action-gh-release needs this to create releases & tags
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build & Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter doctor
+        run: flutter --version
+
+      # The repo currently ships only the Dart source + pubspec.
+      # Generate the android/ platform folder on the runner so the
+      # Gradle build can run. This keeps the repo small and lets the
+      # workflow own the platform-specific boilerplate.
+      - name: Generate Android platform files
+        run: flutter create --platforms=android --org com.textpad --project-name textpad_app .
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze || true
+
+      - name: Build release APK
+        run: flutter build apk --release --no-tree-shake-icons
+
+      - name: Stage APK with build number
+        run: |
+          mkdir -p output
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             output/textpad-app-build${{ github.run_number }}.apk
+          ls -lh output/
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: textpad-release-apk-build${{ github.run_number }}
+          path: output/*.apk
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Create GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0-build${{ github.run_number }}
+          name: Textpad Build #${{ github.run_number }}
+          body: |
+            Automated release APK built from commit ${{ github.sha }}.
+
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** ${{ github.event.head_commit.message }}
+
+            Install: download the `.apk` below, allow "install from unknown sources" on your Android phone, then tap to install.
+          files: output/*.apk
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
